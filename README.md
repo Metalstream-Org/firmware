@@ -30,3 +30,29 @@ Below is short explanation of remaining files in the project folder.
 ```
 Additionally, the sample project contains Makefile and component.mk files, used for the legacy Make based build system. 
 They are not used or needed when building with CMake and idf.py.
+
+
+# Protocol spec
+
+## Command message
+`$<timestamp>:<command>:<payload>#\n`
+
+**timestamp**: timestamp in milliseconds
+**command**: 3 characters
+
+
+## Heartbeat (HBT)
+**command**: HBT
+**payload**: sequence number
+
+
+item timestamp: 32107182 - delayed item timestamp: 22607182
+item timestamp: 32607182 - delayed item timestamp: 23107182
+item timestamp: 33107182 - delayed item timestamp: 23607182
+item timestamp: 33607182 - delayed item timestamp: 24107182
+item timestamp: 34107182 - delayed item timestamp: 24607182
+item timestamp: 34607182 - delayed item timestamp: 25107182
+item timestamp: 35107182 - delayed item timestamp: 25607182
+item timestamp: 35607182 - delayed item timestamp: 26107182
+item timestamp: 36107182 - delayed item timestamp: 26607182
+item timestamp: 36607182 - delayed item timestamp: 27107182

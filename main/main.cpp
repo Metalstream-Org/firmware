@@ -4,38 +4,44 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "driver/gpio.h"
+#include "driver/uart.h"
 #include <esp_adc/adc_oneshot.h>
 #include "string.h"
-#include "tinyusb.h"
-#include "tusb_cdc_acm.h"
 #include "sensor.h"
+#include "driver/usb_serial_jtag.h"
+#include "esp_log.h"
+#include <vector>
+#include <string>
+#include <queue>
+#include "config.h"
 
-// Definities voor de GPIO pins
-#define GPIO_INPUT_PIN 41  // Digital input
-#define ADC_INPUT_CHANNEL ADC1_CHANNEL_5
-#define ADC_WIDTH ADC_WIDTH_BIT_12       // 12-bit resolutie
-#define ADC_ATTEN ADC_ATTEN_DB_12        // Attenuatie voor een breder meetbereik
+const size_t BUF_SIZE = 256;
+const size_t ECHO_TASK_STACK_SIZE = 4096;
+const size_t MAX_MESSAGE_LEN = 256;
+const size_t SAMPLE_RATE = 10;
+const size_t SAMPLE_INTERVAL_MS = 1000 / SAMPLE_RATE;
 
-struct SensorConfig
-{
-    size_t id;
-    adc_channel_t sig_adc_channel;
-    gpio_num_t fbl_pin;
-};
 
-// sensor config for initializing. Should be done with a static array instead of using a dynamic
-SensorConfig config[] = {
-    {1, ADC_CHANNEL_5, GPIO_NUM_41},
-    {2, ADC_CHANNEL_4, GPIO_NUM_42},
-    {3, ADC_CHANNEL_3, GPIO_NUM_2},
-    {4, ADC_CHANNEL_6, GPIO_NUM_1},
-    {5, ADC_CHANNEL_7, GPIO_NUM_21},
-    {6, ADC_CHANNEL_9, GPIO_NUM_47},
-    {7, ADC_CHANNEL_8, GPIO_NUM_48},
-    {8, ADC_CHANNEL_2, GPIO_NUM_45},
-};
+// struct SensorConfig
+// {
+//     size_t id;
+//     adc_channel_t sig_adc_channel;
+//     gpio_num_t fbl_pin;
+// };
 
-const size_t NUM_SENSORS = sizeof(config) / sizeof(config[0]);
+// // sensor config for initializing. Should be done with a static array instead of using a dynamic
+// SensorConfig sensor_config[] = {
+//     {1, ADC_CHANNEL_5, GPIO_NUM_41},
+//     {2, ADC_CHANNEL_4, GPIO_NUM_42},
+//     {3, ADC_CHANNEL_3, GPIO_NUM_2},
+//     {4, ADC_CHANNEL_6, GPIO_NUM_1},
+//     {5, ADC_CHANNEL_7, GPIO_NUM_21},
+//     {6, ADC_CHANNEL_9, GPIO_NUM_47},
+//     {7, ADC_CHANNEL_8, GPIO_NUM_48},
+//     {8, ADC_CHANNEL_2, GPIO_NUM_45},
+// };
+
+const size_t NUM_SENSORS = sizeof(sensor_config) / sizeof(sensor_config[0]);
 
 struct SamplerTaskParams
 {
@@ -44,20 +50,27 @@ struct SamplerTaskParams
     Sensor** sensors;
 };
 
+struct SerialTaskParams
+{
+    QueueHandle_t tx_queue;
+    QueueHandle_t rx_queue;
+};
+
+
 struct SensorResult
 {
+    size_t id;
     int64_t timestamp;
     bool connected;
     int value;
 };
-
-const size_t MAX_NUM_SENSORS = 8;
 
 struct SamplerQueueItem
 {
     SensorResult results[MAX_NUM_SENSORS];
 };
 
+// Samples sensors in seperate task 
 void sampler(void* parameters)
 {
     auto params = static_cast<SamplerTaskParams*>(parameters);
@@ -65,40 +78,155 @@ void sampler(void* parameters)
     SamplerQueueItem queue_item;
 
     while (1) {
-        printf("hello loop\n");
         memset(&queue_item, 0, sizeof(queue_item));
+        int64_t current_time = esp_timer_get_time();
 
+        // Sample the sensors
         for (int i = 0; i < params->num_sensors; i++)
         {
+            queue_item.results[i].id = i + 1;
             queue_item.results[i].connected = params->sensors[i]->is_connected();
             queue_item.results[i].value = params->sensors[i]->sample();
-            queue_item.results[i].timestamp = esp_timer_get_time();
-
-            // printf("S0%d - connected: %d, sampled: %d\n", i+1, params->sensors[i]->is_connected(), params->sensors[i]->sample());
+            queue_item.results[i].timestamp = current_time;
         }
 
+        // Verzenden naar hoofdqueue
         xQueueSend(params->queue, &queue_item, portMAX_DELAY);
-
-        vTaskDelay(pdMS_TO_TICKS(500));  // Wacht 500 ms
+        vTaskDelay(pdMS_TO_TICKS(SAMPLE_INTERVAL_MS));
     }
+}
+
+
+void serial_task(void* parameters)
+{
+    auto params = static_cast<SerialTaskParams*>(parameters);
+
+    char tx_buf[MAX_MESSAGE_LEN];
+    memset(tx_buf, 0, sizeof(tx_buf));
+    char rx_buf[MAX_MESSAGE_LEN];
+    memset(rx_buf, 0, sizeof(rx_buf));
+
+    size_t rd_len = 0;
+    char temp_rx_buf[64];
+
+    while (true)
+    {
+        if (xQueueReceive(params->tx_queue, tx_buf, portMAX_DELAY)) {
+            usb_serial_jtag_write_bytes(tx_buf, strlen(tx_buf), 20 / portTICK_PERIOD_MS);
+            memset(tx_buf, 0, sizeof(tx_buf));
+        }
+
+        int len = usb_serial_jtag_read_bytes(temp_rx_buf, sizeof(temp_rx_buf), 20 / portTICK_PERIOD_MS);
+
+        // Write data back to the USB SERIAL JTAG
+        if (len > 0) {
+
+            // check if we have enough space in rd_buf
+            if ((rd_len + len + 1)  < sizeof (rx_buf)) {
+                // copy in new received data
+                memcpy(&rx_buf[rd_len], temp_rx_buf, len);
+                memset(temp_rx_buf, 0, sizeof(temp_rx_buf));
+                rd_len += len;
+            } else {
+                // discard everything when buffer overflows
+                rd_len = 0;
+            }
+
+            // make sure string is terminated
+            rx_buf[rd_len] = '\0';
+
+            // parse message
+            if (rd_len > 0 ) {
+                char* start = strchr((const char*)rx_buf, '$');
+                
+                // remove everything before start
+                if (start != nullptr)
+                {
+                    rd_len = rd_len - ((size_t)start - (size_t)rx_buf);
+                    memmove(rx_buf, start, rd_len + 1);
+
+                    // check if we have a complete message
+                    char* end = strchr((const char*)rx_buf, '#');
+                    
+                    if (end != nullptr) {
+                        // construct output message (in data), skip for character ($)
+                        size_t olen = (size_t)end - (size_t)rx_buf;
+                        rx_buf[olen] = '\0';
+
+                        xQueueSend(params->rx_queue, &rx_buf[1], portMAX_DELAY);
+                        
+                        rd_len = 0;
+                        memset(rx_buf, 0x00, sizeof(rx_buf));
+                    }
+                }
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
+
+
+// 4 bytes because command consists of 3 characters + zero terminator string
+void send_message(const QueueHandle_t queue, const char command[4], const char* payload)
+{
+    static char buf[MAX_MESSAGE_LEN];
+
+    memset(buf, 0x00, sizeof(buf));
+
+    auto timestamp = esp_timer_get_time() / 1000;
+    snprintf(buf, sizeof(buf), "$%lld:%s:%s#\n", timestamp, command, payload);
+    
+    xQueueSend(queue, buf, portMAX_DELAY);
+}
+
+
+void send_heartbeat(const QueueHandle_t queue)
+{
+    static int sequence = 0;
+
+    sequence++;
+
+    char payload[12];
+
+    snprintf(payload, sizeof(payload), "%d", sequence);
+    send_message(queue, "HBT", payload);
+}
+
+void send_sensor_measurements(const QueueHandle_t queue, const SensorResult* sensors)
+{
+    static char payload[MAX_MESSAGE_LEN];
+    memset(payload, 0x00, sizeof(payload));
+
+    int offset = 0;
+
+    for (int i = 0; i < NUM_SENSORS; i++)
+    {
+        const char* sep = (i==(NUM_SENSORS-1)) ? "" : ":"; 
+        
+        auto sensor = sensors[i];
+        offset += snprintf(&payload[offset], sizeof(payload) - offset, "ID=%d:T=%lld:C=%d:V=%d%s", 
+            sensor.id,
+            sensor.timestamp,
+            sensor.connected,
+            sensor.value,
+            sep);
+    }
+
+    // TODO: naam
+    send_message(queue, "SMS", payload);
 }
 
 extern "C" void app_main(void)
 {
-    const tinyusb_config_cdcacm_t acm_cfg = {
-        .usb_dev = TINYUSB_USBDEV_0,
-        .cdc_port = TINYUSB_CDC_ACM_0,
-        .rx_unread_buf_sz = 64,
-        .callback_rx = NULL,
-        .callback_rx_wanted_char = NULL,
-        .callback_line_state_changed = NULL,
-        .callback_line_coding_changed = NULL
+    usb_serial_jtag_driver_config_t usb_serial_jtag_config = {
+        .tx_buffer_size = BUF_SIZE,
+        .rx_buffer_size = BUF_SIZE,
     };
-    tusb_cdc_acm_init(&acm_cfg);
 
+    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usb_serial_jtag_config));
 
-
-    auto queue = xQueueCreate(3, sizeof(SamplerQueueItem));
     printf("before ADC initialisation\n");
     adc_oneshot_unit_handle_t adc1_handle;
     adc_oneshot_unit_init_cfg_t unit_config = {
@@ -113,48 +241,72 @@ extern "C" void app_main(void)
         sensors[i] = new Sensor(adc1_handle, config[i].sig_adc_channel, config[i].fbl_pin);
     }
 
-    SamplerTaskParams params = {queue, NUM_SENSORS, sensors};
-    xTaskCreate(sampler, "Sampler", 2048, &params, 5, nullptr);
+    auto queue = xQueueCreate(5, sizeof(SamplerQueueItem));
+    char rx_buf[MAX_MESSAGE_LEN];
+
+    SamplerTaskParams sampler_params = {queue, NUM_SENSORS, sensors};
+    xTaskCreate(sampler, "Sampler", 2048, &sampler_params, 5, nullptr);
+
+    auto serial_tx_queue = xQueueCreate(50, sizeof(char[MAX_MESSAGE_LEN]));
+    auto serial_rx_queue = xQueueCreate(10, sizeof(char[MAX_MESSAGE_LEN]));
+
+    SerialTaskParams serial_params = {.tx_queue=serial_tx_queue, .rx_queue=serial_rx_queue};
+    xTaskCreate(serial_task, "serial", 8192, &serial_params, 5, nullptr);
+
+    SamplerQueueItem sampler_queue_item;
+
+    std::queue<SamplerQueueItem> delay_buffer;
+
+    size_t calibration_time_ms = 2100;
+    size_t num_delayed_samples = calibration_time_ms * SAMPLE_RATE / 1000;
 
     while(1)
     {
-        SamplerQueueItem sampler_queue_item;
+        // while loop to read mulitiple s
+        while (xQueueReceive(queue, &sampler_queue_item, pdMS_TO_TICKS(1))) {
+            delay_buffer.push(sampler_queue_item);
 
-        // $:timestamp:payload:checksum:#
+                    UBaseType_t items = uxQueueMessagesWaiting(queue);
+            printf("num delayed samples: %d, queue contains: %d\n", num_delayed_samples, items);
 
-        if (xQueueReceive(queue, &sampler_queue_item, portMAX_DELAY)) {
-            for (int i = 0; i < NUM_SENSORS; i++)
+            // time between sensors * sample rate
+            // groter dan, want items is hiervoor al gepushed, dus een item er af voor num_delayed_samples
+            if (delay_buffer.size() > num_delayed_samples)
             {
-                printf("S0%d - timestamp: %lld, connected: %d, sampled: %d\n", i+1, sampler_queue_item.results[i].timestamp, sampler_queue_item.results[i].connected, sampler_queue_item.results[i].value);
+                auto delayed_queue_item = delay_buffer.front();
+                delay_buffer.pop();
+                printf("item timestamp: %lld - delayed item timestamp: %lld | DELTA: %lld\n", sampler_queue_item.results[0].timestamp, delayed_queue_item.results[0].timestamp, (sampler_queue_item.results[0].timestamp - delayed_queue_item.results[0].timestamp)/1000);
+
+                
             }
 
-            // Verwerking of opslaan
+
+   
+            send_sensor_measurements(serial_tx_queue, sampler_queue_item.results);
+                // printf("S0%d - timestamp: %lld, connected: %d, sampled: %d\n", i+1, sampler_queue_item.results[i].timestamp, sampler_queue_item.results[i].connected, sampler_queue_item.results[i].value);
+    
+            
         }
-        vTaskDelay(pdMS_TO_TICKS(100));
+
+        if (xQueueReceive(serial_rx_queue, &rx_buf, pdMS_TO_TICKS(1)))
+        {
+            // printf("Queue receive RX: %s\n", rx_buf);
+
+            // char *token;
+            
+            // /* get the first token */
+            // token = strtok(rx_buf, ":");
+
+            // while(token != nullptr) {
+            //     printf("token: '%s' \n", token);
+            //     token = strtok(nullptr, ":");
+            // }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+
     }
 
-
-    // printf("before loop\n");
-    // Eindeloze loop om zowel de digitale input als de ADC-waarde uit te lezen
-    // while (1) {
-    //     printf("hello loop\n");
-    //     // Lees de digitale input van GPIO 41
-    //     // int pin_state = gpio_get_level((gpio_num_t)GPIO_INPUT_PIN);
-    //     // printf("GPIO 41 state: %d\n", pin_state);
-
-    //     // // Lees de ADC-waarde van GPIO 6
-    //     // int adc_value = adc1_get_raw(ADC_INPUT_CHANNEL);
-    //     // printf("ADC waarde van GPIO 6: %d\n", adc_value);
-
-    //     for (int i = 0; i < NUM_SENSORS; i++)
-    //     {
-    //         printf("S0%d - connected: %d, sampled: %d\n", i+1, sensors[i]->is_connected(), sensors[i]->sample());
-    //     }
-
-    //     vTaskDelay(pdMS_TO_TICKS(500));  // Wacht 500 ms
-    // }
-
-    // Clean up sensors when deinitializing
     for (int i = 0; i < NUM_SENSORS; i++)
     {
         delete sensors[i];
