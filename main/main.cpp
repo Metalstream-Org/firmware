@@ -41,7 +41,18 @@ const size_t SAMPLE_INTERVAL_MS = 1000 / SAMPLE_RATE;
 //     {8, ADC_CHANNEL_2, GPIO_NUM_45},
 // };
 
-const size_t NUM_SENSORS = sizeof(sensor_config) / sizeof(sensor_config[0]);
+Config config = {
+    .sensors {
+        {.id=1, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_5, .fbl_pin=GPIO_NUM_41, .x=1, .y=0},
+        {.id=2, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_4, .fbl_pin=GPIO_NUM_42, .x=1, .y=0},
+        {.id=3, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_3, .fbl_pin=GPIO_NUM_2, .x=1, .y=0},
+        {.id=4, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_6, .fbl_pin=GPIO_NUM_1, .x=1, .y=0},
+        {.id=5, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_7, .fbl_pin=GPIO_NUM_21, .x=1, .y=0},
+        {.id=6, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_9, .fbl_pin=GPIO_NUM_47, .x=1, .y=0},
+        {.id=7, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_8, .fbl_pin=GPIO_NUM_48, .x=1, .y=0},
+        {.id=8, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_2, .fbl_pin=GPIO_NUM_45, .x=1, .y=0},
+    }
+};
 
 struct SamplerTaskParams
 {
@@ -67,7 +78,7 @@ struct SensorResult
 
 struct SamplerQueueItem
 {
-    SensorResult results[MAX_NUM_SENSORS];
+    SensorResult results[NUM_SENSORS];
 };
 
 // Samples sensors in seperate task 
@@ -238,7 +249,7 @@ extern "C" void app_main(void)
 
     for (int i = 0; i < NUM_SENSORS; i++)
     {
-        sensors[i] = new Sensor(adc1_handle, config[i].sig_adc_channel, config[i].fbl_pin);
+        sensors[i] = new Sensor(adc1_handle, config.sensors[i].sig_adc_channel, config.sensors[i].fbl_pin);
     }
 
     auto queue = xQueueCreate(5, sizeof(SamplerQueueItem));
