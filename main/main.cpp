@@ -14,6 +14,7 @@
 #include <string>
 #include <queue>
 #include "config.h"
+#include <algorithm>
 
 const size_t BUF_SIZE = 256;
 const size_t ECHO_TASK_STACK_SIZE = 4096;
@@ -78,7 +79,43 @@ struct SensorResult
 
 struct SamplerQueueItem
 {
+    int64_t timestamp;
+    // TODO! remove timstamp from sensor result
     SensorResult results[NUM_SENSORS];
+};
+
+// TODO! better naming
+class MeasuremenstState
+{
+    public:
+        MeasuremenstState()
+        {
+
+        }
+
+        void update(int64_t timestamp, int width)
+        {
+            m_max_width = std::max<int>(width, m_max_width);
+            
+            if (m_start_timestamp == 0)
+            {
+                m_start_timestamp = timestamp;
+            }
+        }
+
+        void clear()
+        {
+            m_max_width = 0;
+            m_start_timestamp = 0;
+        }
+
+        int get_max_width() const { return m_max_width; };
+        int64_t get_start_timestamp() const { return m_start_timestamp; }
+
+    private:
+        // the maximum measured width
+        int m_max_width;
+        int64_t m_start_timestamp = 0;
 };
 
 // Samples sensors in seperate task 
@@ -91,6 +128,8 @@ void sampler(void* parameters)
     while (1) {
         memset(&queue_item, 0, sizeof(queue_item));
         int64_t current_time = esp_timer_get_time();
+
+        queue_item.timestamp = current_time;
 
         // Sample the sensors
         for (int i = 0; i < params->num_sensors; i++)
@@ -272,13 +311,13 @@ extern "C" void app_main(void)
     size_t calibration_time_ms = 2100;
     size_t num_delayed_samples = calibration_time_ms * SAMPLE_RATE / 1000;
 
+    MeasuremenstState measurements_state;
+
     while(1)
     {
         // while loop to read mulitiple samples at once
         while (xQueueReceive(queue, &sampler_queue_item, pdMS_TO_TICKS(1))) {
             delay_buffer.push(sampler_queue_item);
-
-                    UBaseType_t items = uxQueueMessagesWaiting(queue);
             // printf("num delayed samples: %d, queue contains: %d\n", num_delayed_samples, items);
 
             // time between sensors * sample rate
@@ -316,9 +355,21 @@ extern "C" void app_main(void)
                     int width = config.sensors[right_sensor->id - 1].x - config.sensors[left_sensor->id - 1].x + SENSOR_WIDTH;
                     printf("Breedte: %d mm (sensor %d tot %d)\n",
                         width, left_sensor->id, right_sensor->id);
+
+                    measurements_state.update(sampler_queue_item.timestamp, width);
                 } else
                 {
-                    printf("kan breedte niet meten\n");
+                    auto width = measurements_state.get_max_width();
+                    auto timestamp = measurements_state.get_start_timestamp();
+
+                    if (timestamp > 0) {
+                        // TODO!: Config check for [0] sensor
+                        int64_t delta =  sampler_queue_item.timestamp - timestamp;
+
+                        printf("Got result - timestamp: %lld, width: %d\n", delta, width);
+                    }
+
+                    measurements_state.clear();
                 }
 
 
@@ -329,9 +380,7 @@ extern "C" void app_main(void)
 
    
             send_sensor_measurements(serial_tx_queue, sampler_queue_item.results);
-                // printf("S0%d - timestamp: %lld, connected: %d, sampled: %d\n", i+1, sampler_queue_item.results[i].timestamp, sampler_queue_item.results[i].connected, sampler_queue_item.results[i].value);
-    
-            
+                // printf("S0%d - timestamp: %lld, connected: %d, sampled: %d\n", i+1, sampler_queue_item.results[i].timestamp, sampler_queue_item.results[i].connected, sampler_queue_item.results[i].value);        
         }
 
         if (xQueueReceive(serial_rx_queue, &rx_buf, pdMS_TO_TICKS(1)))
