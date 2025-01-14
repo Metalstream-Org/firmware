@@ -72,7 +72,6 @@ struct SerialTaskParams
 struct SensorResult
 {
     size_t id;
-    int64_t timestamp;
     bool connected;
     int value;
 };
@@ -127,9 +126,7 @@ void sampler(void* parameters)
 
     while (1) {
         memset(&queue_item, 0, sizeof(queue_item));
-        int64_t current_time = esp_timer_get_time();
-
-        queue_item.timestamp = current_time;
+        queue_item.timestamp = esp_timer_get_time();
 
         // Sample the sensors
         for (int i = 0; i < params->num_sensors; i++)
@@ -137,7 +134,6 @@ void sampler(void* parameters)
             queue_item.results[i].id = i + 1;
             queue_item.results[i].connected = params->sensors[i]->is_connected();
             queue_item.results[i].value = params->sensors[i]->sample();
-            queue_item.results[i].timestamp = current_time;
         }
 
         // Verzenden naar hoofdqueue
@@ -226,7 +222,7 @@ void send_message(const QueueHandle_t queue, const char command[4], const char* 
     memset(buf, 0x00, sizeof(buf));
 
     auto timestamp = esp_timer_get_time() / 1000;
-    snprintf(buf, sizeof(buf), "$%lld:%s:%s#\n", timestamp, command, payload);
+    snprintf(buf, sizeof(buf), "$%lld:%s:%s#\r\n", timestamp, command, payload);
     
     xQueueSend(queue, buf, portMAX_DELAY);
 }
@@ -244,21 +240,22 @@ void send_heartbeat(const QueueHandle_t queue)
     send_message(queue, "HBT", payload);
 }
 
-void send_sensor_measurements(const QueueHandle_t queue, const SensorResult* sensors)
+void send_sensor_measurements(const QueueHandle_t queue, const SamplerQueueItem& item)
 {
     static char payload[MAX_MESSAGE_LEN];
     memset(payload, 0x00, sizeof(payload));
 
     int offset = 0;
 
+    offset += snprintf(&payload[offset], sizeof(payload) - offset, "T=%lld:", item.timestamp);
+
     for (int i = 0; i < NUM_SENSORS; i++)
     {
         const char* sep = (i==(NUM_SENSORS-1)) ? "" : ":"; 
         
-        auto sensor = sensors[i];
-        offset += snprintf(&payload[offset], sizeof(payload) - offset, "ID=%d:T=%lld:C=%d:V=%d%s", 
+        auto sensor = item.results[i];
+        offset += snprintf(&payload[offset], sizeof(payload) - offset, "ID=%d:C=%d:V=%d%s", 
             sensor.id,
-            sensor.timestamp,
             sensor.connected,
             sensor.value,
             sep);
@@ -379,7 +376,7 @@ extern "C" void app_main(void)
 
 
    
-            send_sensor_measurements(serial_tx_queue, sampler_queue_item.results);
+            send_sensor_measurements(serial_tx_queue, sampler_queue_item);
                 // printf("S0%d - timestamp: %lld, connected: %d, sampled: %d\n", i+1, sampler_queue_item.results[i].timestamp, sampler_queue_item.results[i].connected, sampler_queue_item.results[i].value);        
         }
 
