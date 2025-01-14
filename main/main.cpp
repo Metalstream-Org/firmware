@@ -43,14 +43,14 @@ const size_t SAMPLE_INTERVAL_MS = 1000 / SAMPLE_RATE;
 
 Config config = {
     .sensors {
-        {.id=1, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_5, .fbl_pin=GPIO_NUM_41, .x=1, .y=0},
-        {.id=2, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_4, .fbl_pin=GPIO_NUM_42, .x=1, .y=0},
-        {.id=3, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_3, .fbl_pin=GPIO_NUM_2, .x=1, .y=0},
-        {.id=4, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_6, .fbl_pin=GPIO_NUM_1, .x=1, .y=0},
-        {.id=5, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_7, .fbl_pin=GPIO_NUM_21, .x=1, .y=0},
-        {.id=6, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_9, .fbl_pin=GPIO_NUM_47, .x=1, .y=0},
-        {.id=7, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_8, .fbl_pin=GPIO_NUM_48, .x=1, .y=0},
-        {.id=8, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_2, .fbl_pin=GPIO_NUM_45, .x=1, .y=0},
+        {.id=1, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_5, .fbl_pin=GPIO_NUM_41, .delayed=false, .x=60, .y=0},
+        {.id=2, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_4, .fbl_pin=GPIO_NUM_42, .delayed=true, .x=120, .y=50},
+        {.id=3, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_3, .fbl_pin=GPIO_NUM_2, .delayed=false, .x=180, .y=0},
+        {.id=4, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_6, .fbl_pin=GPIO_NUM_1, .delayed=true, .x=240, .y=0},
+        {.id=5, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_7, .fbl_pin=GPIO_NUM_21, .delayed=false, .x=300, .y=0},
+        {.id=6, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_9, .fbl_pin=GPIO_NUM_47, .delayed=true, .x=360, .y=0},
+        {.id=7, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_8, .fbl_pin=GPIO_NUM_48, .delayed=false, .x=420, .y=0},
+        {.id=8, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_2, .fbl_pin=GPIO_NUM_45, .delayed=true, .x=480, .y=0},
     }
 };
 
@@ -268,17 +268,18 @@ extern "C" void app_main(void)
 
     std::queue<SamplerQueueItem> delay_buffer;
 
+    // the time between top and bottom sensors, should be calibrated
     size_t calibration_time_ms = 2100;
     size_t num_delayed_samples = calibration_time_ms * SAMPLE_RATE / 1000;
 
     while(1)
     {
-        // while loop to read mulitiple s
+        // while loop to read mulitiple samples at once
         while (xQueueReceive(queue, &sampler_queue_item, pdMS_TO_TICKS(1))) {
             delay_buffer.push(sampler_queue_item);
 
                     UBaseType_t items = uxQueueMessagesWaiting(queue);
-            printf("num delayed samples: %d, queue contains: %d\n", num_delayed_samples, items);
+            // printf("num delayed samples: %d, queue contains: %d\n", num_delayed_samples, items);
 
             // time between sensors * sample rate
             // groter dan, want items is hiervoor al gepushed, dus een item er af voor num_delayed_samples
@@ -286,9 +287,43 @@ extern "C" void app_main(void)
             {
                 auto delayed_queue_item = delay_buffer.front();
                 delay_buffer.pop();
-                printf("item timestamp: %lld - delayed item timestamp: %lld | DELTA: %lld\n", sampler_queue_item.results[0].timestamp, delayed_queue_item.results[0].timestamp, (sampler_queue_item.results[0].timestamp - delayed_queue_item.results[0].timestamp)/1000);
+                // printf("item timestamp: %lld - delayed item timestamp: %lld | DELTA: %lld\n", sampler_queue_item.results[0].timestamp, delayed_queue_item.results[0].timestamp, (sampler_queue_item.results[0].timestamp - delayed_queue_item.results[0].timestamp)/1000);
 
-                
+                const SensorResult* left_sensor = nullptr;
+                const SensorResult* right_sensor = nullptr;
+
+                for (size_t i = 0; i < NUM_SENSORS; i++)
+                {
+                    const SensorResult& result = config.sensors[i].delayed 
+                        ? delayed_queue_item.results[i] 
+                        : sampler_queue_item.results[i];
+
+                    if (result.connected && result.value >= config.sensors[i].threshold)
+                    {
+                        if (!left_sensor || config.sensors[i].x < config.sensors[left_sensor->id - 1].x) {
+                            left_sensor = &result;
+                        }
+
+                        if (!right_sensor || config.sensors[i].x > config.sensors[right_sensor->id - 1].x) {
+                            right_sensor = &result;
+                        }
+                    }
+                }
+
+                // Bereken breedte als beide sensoren zijn gevonden
+                if (left_sensor && right_sensor)
+                {
+                    int width = config.sensors[right_sensor->id - 1].x - config.sensors[left_sensor->id - 1].x + SENSOR_WIDTH;
+                    printf("Breedte: %d mm (sensor %d tot %d)\n",
+                        width, left_sensor->id, right_sensor->id);
+                } else
+                {
+                    printf("kan breedte niet meten\n");
+                }
+
+
+                // printf("first item timestamp: %lld - second item timestamp: %lld | DELTA: %lld\n", combined_results[0].timestamp, combined_results[1].timestamp, (combined_results[0].timestamp - combined_results[1].timestamp)/1000);
+
             }
 
 
