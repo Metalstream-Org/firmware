@@ -15,52 +15,13 @@
 #include <queue>
 #include "config.h"
 #include <algorithm>
+#include "sensor.h"
 
 const size_t BUF_SIZE = 256;
 const size_t ECHO_TASK_STACK_SIZE = 4096;
 const size_t MAX_MESSAGE_LEN = 256;
 const size_t SAMPLE_RATE = 10;
 const size_t SAMPLE_INTERVAL_MS = 1000 / SAMPLE_RATE;
-
-
-// struct SensorConfig
-// {
-//     size_t id;
-//     adc_channel_t sig_adc_channel;
-//     gpio_num_t fbl_pin;
-// };
-
-// // sensor config for initializing. Should be done with a static array instead of using a dynamic
-// SensorConfig sensor_config[] = {
-//     {1, ADC_CHANNEL_5, GPIO_NUM_41},
-//     {2, ADC_CHANNEL_4, GPIO_NUM_42},
-//     {3, ADC_CHANNEL_3, GPIO_NUM_2},
-//     {4, ADC_CHANNEL_6, GPIO_NUM_1},
-//     {5, ADC_CHANNEL_7, GPIO_NUM_21},
-//     {6, ADC_CHANNEL_9, GPIO_NUM_47},
-//     {7, ADC_CHANNEL_8, GPIO_NUM_48},
-//     {8, ADC_CHANNEL_2, GPIO_NUM_45},
-// };
-
-Config config = {
-    .sensors {
-        {.id=1, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_5, .fbl_pin=GPIO_NUM_41, .delayed=false, .x=60, .y=0},
-        {.id=2, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_4, .fbl_pin=GPIO_NUM_42, .delayed=true, .x=120, .y=50},
-        {.id=3, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_3, .fbl_pin=GPIO_NUM_2, .delayed=false, .x=180, .y=0},
-        {.id=4, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_6, .fbl_pin=GPIO_NUM_1, .delayed=true, .x=240, .y=0},
-        {.id=5, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_7, .fbl_pin=GPIO_NUM_21, .delayed=false, .x=300, .y=0},
-        {.id=6, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_9, .fbl_pin=GPIO_NUM_47, .delayed=true, .x=360, .y=0},
-        {.id=7, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_8, .fbl_pin=GPIO_NUM_48, .delayed=false, .x=420, .y=0},
-        {.id=8, .threshold=1023, .sig_adc_channel=ADC_CHANNEL_2, .fbl_pin=GPIO_NUM_45, .delayed=true, .x=480, .y=0},
-    }
-};
-
-struct SamplerTaskParams
-{
-    QueueHandle_t queue;
-    size_t num_sensors;
-    Sensor** sensors;
-};
 
 struct SerialTaskParams
 {
@@ -117,6 +78,14 @@ class MeasuremenstState
         int64_t m_start_timestamp = 0;
 };
 
+struct SamplerTaskParams
+{
+    QueueHandle_t queue;
+    size_t num_sensors;
+    Sensor* sensors;
+};
+
+
 // Samples sensors in seperate task 
 void sampler(void* parameters)
 {
@@ -132,12 +101,13 @@ void sampler(void* parameters)
         for (int i = 0; i < params->num_sensors; i++)
         {
             queue_item.results[i].id = i + 1;
-            queue_item.results[i].connected = params->sensors[i]->is_connected();
-            queue_item.results[i].value = params->sensors[i]->sample();
+            queue_item.results[i].connected = params->sensors[i].is_connected();
+            queue_item.results[i].value = params->sensors[i].sample();
         }
 
-        // Verzenden naar hoofdqueue
+        // Verzend het sample naar de queue
         xQueueSend(params->queue, &queue_item, portMAX_DELAY);
+        // Hier wordt gebruik gemaakt van een delay om te zorgen dat de task sampled op de juiste frequentie (SAMPLE_INTERVAL)
         vTaskDelay(pdMS_TO_TICKS(SAMPLE_INTERVAL_MS));
     }
 }
@@ -267,33 +237,39 @@ void send_sensor_measurements(const QueueHandle_t queue, const SamplerQueueItem&
 
 extern "C" void app_main(void)
 {
+    // Initialiseer seriële communicatie via usb cdc poort
     usb_serial_jtag_driver_config_t usb_serial_jtag_config = {
         .tx_buffer_size = BUF_SIZE,
         .rx_buffer_size = BUF_SIZE,
     };
-
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usb_serial_jtag_config));
 
-    printf("before ADC initialisation\n");
+    // Initialiseer ADC driver
     adc_oneshot_unit_handle_t adc1_handle;
     adc_oneshot_unit_init_cfg_t unit_config = {
         .unit_id = ADC_UNIT_1,  // Gebruik ADC Unit 1
     };
     ESP_ERROR_CHECK(adc_oneshot_new_unit(&unit_config, &adc1_handle));
 
-    Sensor** sensors = new Sensor*[NUM_SENSORS];
-
-    for (int i = 0; i < NUM_SENSORS; i++)
-    {
-        sensors[i] = new Sensor(adc1_handle, config.sensors[i].sig_adc_channel, config.sensors[i].fbl_pin);
-    }
+    Sensor sensors[NUM_SENSORS] = {
+        Sensor(1, 1300, adc1_handle, ADC_CHANNEL_5, GPIO_NUM_41, false, 60, 0),
+        Sensor(2, 1300, adc1_handle, ADC_CHANNEL_4, GPIO_NUM_42, true, 120, 50),
+        Sensor(3, 1300, adc1_handle, ADC_CHANNEL_3, GPIO_NUM_2, false, 180, 0),
+        Sensor(4, 1300, adc1_handle, ADC_CHANNEL_6, GPIO_NUM_1, true, 240, 0),
+        Sensor(5, 1300, adc1_handle, ADC_CHANNEL_7, GPIO_NUM_21, false, 300, 0),
+        Sensor(6, 1300, adc1_handle, ADC_CHANNEL_9, GPIO_NUM_47, true, 360, 0),
+        Sensor(7, 1300, adc1_handle, ADC_CHANNEL_8, GPIO_NUM_48, false, 420, 0),
+        Sensor(8, 1300, adc1_handle, ADC_CHANNEL_2, GPIO_NUM_45, true, 480, 0)
+    };
 
     auto queue = xQueueCreate(5, sizeof(SamplerQueueItem));
     char rx_buf[MAX_MESSAGE_LEN];
 
+    // Create sampler task
     SamplerTaskParams sampler_params = {queue, NUM_SENSORS, sensors};
-    xTaskCreate(sampler, "Sampler", 2048, &sampler_params, 5, nullptr);
+    xTaskCreate(sampler, "sampler", 2048, &sampler_params, 5, nullptr);
 
+    // Create serial task
     auto serial_tx_queue = xQueueCreate(50, sizeof(char[MAX_MESSAGE_LEN]));
     auto serial_rx_queue = xQueueCreate(10, sizeof(char[MAX_MESSAGE_LEN]));
 
@@ -310,37 +286,39 @@ extern "C" void app_main(void)
 
     MeasuremenstState measurements_state;
 
-    while(1)
+    while(true)
     {
-        // while loop to read mulitiple samples at once
+        // Hier wordt gebruik gemaakt van een while loop, omdat we alle inkomende samples willen verwerken, als we dit niet doen loopt de queue over
         while (xQueueReceive(queue, &sampler_queue_item, pdMS_TO_TICKS(1))) {
+            // Voeg elk sample wat binnenkomt ook toe aan de delay buffer, hierdoor kunnen we later dynamisch nog de plaatsing van de sensoren veranderen
             delay_buffer.push(sampler_queue_item);
-            // printf("num delayed samples: %d, queue contains: %d\n", num_delayed_samples, items);
 
-            // time between sensors * sample rate
-            // groter dan, want items is hiervoor al gepushed, dus een item er af voor num_delayed_samples
+            // De samples op de tweede rij moeten met de tijd tussen rij een en rij twee worden vertraagd, dit is op basis van de snelheid van de lopende band. Vervolgens rekenen we met die tijd en de sample rate het aantal samples dat in deze tijd genomen worden. Op basis hiervan bepalen we de delay buffer grootte. We checken hier of de grootte van de delay buffer groter is, omdat hiervoor al een sample wordt gepushed naar de delay buffer
             if (delay_buffer.size() > num_delayed_samples)
             {
+                // De delay buffer werkt als een FIFO buffer. We willen hier dus het eerste item uit de queue halen. Deze is vertraagd met de tijd tussen de rijen
                 auto delayed_queue_item = delay_buffer.front();
                 delay_buffer.pop();
-                // printf("item timestamp: %lld - delayed item timestamp: %lld | DELTA: %lld\n", sampler_queue_item.results[0].timestamp, delayed_queue_item.results[0].timestamp, (sampler_queue_item.results[0].timestamp - delayed_queue_item.results[0].timestamp)/1000);
+
+                // printf("item timestamp: %lld - delayed item timestamp: %lld | DELTA: %lld\n", sampler_queue_item.timestamp, delayed_queue_item.timestamp, (sampler_queue_item.timestamp - delayed_queue_item.timestamp)/1000);
 
                 const SensorResult* left_sensor = nullptr;
                 const SensorResult* right_sensor = nullptr;
 
                 for (size_t i = 0; i < NUM_SENSORS; i++)
                 {
-                    const SensorResult& result = config.sensors[i].delayed 
+                    const SensorResult& result = sensors[i].is_delayed() 
                         ? delayed_queue_item.results[i] 
                         : sampler_queue_item.results[i];
 
-                    if (result.connected && result.value >= config.sensors[i].threshold)
+                    if (result.connected && result.value >= sensors[i].get_threshold())
                     {
-                        if (!left_sensor || config.sensors[i].x < config.sensors[left_sensor->id - 1].x) {
+                        // printf("sensor id: %d, detected value: %d\n", result.id, result.value);
+                        if (!left_sensor || sensors[i].get_x() < sensors[left_sensor->id - 1].get_x()) {
                             left_sensor = &result;
                         }
 
-                        if (!right_sensor || config.sensors[i].x > config.sensors[right_sensor->id - 1].x) {
+                        if (!right_sensor || sensors[i].get_x() > sensors[right_sensor->id - 1].get_x()) {
                             right_sensor = &result;
                         }
                     }
@@ -349,7 +327,7 @@ extern "C" void app_main(void)
                 // Bereken breedte als beide sensoren zijn gevonden
                 if (left_sensor && right_sensor)
                 {
-                    int width = config.sensors[right_sensor->id - 1].x - config.sensors[left_sensor->id - 1].x + SENSOR_WIDTH;
+                    int width = sensors[right_sensor->id - 1].get_x() - sensors[left_sensor->id - 1].get_x() + SENSOR_WIDTH;
                     printf("Breedte: %d mm (sensor %d tot %d)\n",
                         width, left_sensor->id, right_sensor->id);
 
@@ -374,7 +352,6 @@ extern "C" void app_main(void)
 
             }
 
-
    
             send_sensor_measurements(serial_tx_queue, sampler_queue_item);
                 // printf("S0%d - timestamp: %lld, connected: %d, sampled: %d\n", i+1, sampler_queue_item.results[i].timestamp, sampler_queue_item.results[i].connected, sampler_queue_item.results[i].value);        
@@ -398,11 +375,4 @@ extern "C" void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(10));
 
     }
-
-    for (int i = 0; i < NUM_SENSORS; i++)
-    {
-        delete sensors[i];
-    }
-
-    delete[] sensors;
 }

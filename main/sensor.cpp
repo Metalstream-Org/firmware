@@ -4,7 +4,7 @@
 
 #include "sensor.h"
 
-Sensor::Sensor(adc_oneshot_unit_handle_t adc_handle, adc_channel_t sig_adc_channel, gpio_num_t fbl_pin) : m_adc_handle{adc_handle}, m_sig_adc_channel{sig_adc_channel}, m_fbl_pin{fbl_pin}
+Sensor::Sensor(size_t id, int threshold, adc_oneshot_unit_handle_t adc_handle, adc_channel_t sig_adc_channel, gpio_num_t fbl_pin, bool delayed, int x, int y) : m_id{id}, m_threshold{threshold}, m_adc_handle{adc_handle}, m_sig_adc_channel{sig_adc_channel}, m_fbl_pin{fbl_pin}, m_delayed{delayed}, m_x{x}, m_y{y}
 {
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << fbl_pin),
@@ -24,9 +24,29 @@ Sensor::Sensor(adc_oneshot_unit_handle_t adc_handle, adc_channel_t sig_adc_chann
     ESP_ERROR_CHECK(adc_oneshot_config_channel(m_adc_handle, m_sig_adc_channel, &config));
 }
 
-bool Sensor::is_connected()
+bool Sensor::is_connected() const
 {
     return gpio_get_level(m_fbl_pin) == 0;
+}
+
+int Sensor::get_threshold() const
+{
+    return m_threshold;   
+}
+
+bool Sensor::is_delayed() const
+{
+    return m_delayed;
+}
+
+int Sensor::get_x() const
+{
+    return m_x;
+}
+
+int Sensor::get_y() const
+{
+    return m_y;
 }
 
 uint16_t Sensor::sample()
