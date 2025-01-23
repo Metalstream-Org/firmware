@@ -383,7 +383,9 @@ extern "C" void app_main(void)
                         // TODO!: Config check for [0] sensor
                         // Delta tijd in seconden
                         float delta_in_s =  (sampler_queue_item.timestamp - timestamp) / 1000.0 / 1000.0;
-                        int length = delta_in_s / calibration_time_ms;
+                        
+                        // s=v*t
+                        size_t length = static_cast<size_t>((conveyer_belt_speed*10)*delta_in_s);
 
                         char payload[MAX_MESSAGE_LEN];
 
