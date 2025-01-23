@@ -135,7 +135,6 @@ void serial_task(void* parameters)
     {
         // While loop to empty the tx queue
         while (xQueueReceive(params->tx_queue, tx_buf, pdMS_TO_TICKS(1))) {
-            ESP_LOGI(TAG, "Queue receive item from tx queue");
             usb_serial_jtag_write_bytes(tx_buf, strlen(tx_buf), 20 / portTICK_PERIOD_MS);
             memset(tx_buf, 0, sizeof(tx_buf));
         }
@@ -321,7 +320,8 @@ extern "C" void app_main(void)
     std::queue<SamplerQueueItem> delay_buffer;
 
     // the time between top and bottom sensors, should be calibrated
-    size_t calibration_time_ms = 9400;
+    // s=v*t where s=10cm (distance between sensors front/back) and v=9.4cm (conveyer belt speed). 
+    size_t calibration_time_ms = (10*1000)/9.4;
     MeasuremenstState measurements_state;
 
     int64_t calibration_start_timestamp = 0;
@@ -336,7 +336,6 @@ extern "C" void app_main(void)
         // Hier wordt gebruik gemaakt van een while loop, omdat we alle inkomende samples willen verwerken, als we dit niet doen loopt de queue over
         while (xQueueReceive(queue, &sampler_queue_item, pdMS_TO_TICKS(1)))
         {
-            ESP_LOGI(TAG, "in while loop in main\n");
             // Voeg elk sample wat binnenkomt ook toe aan de delay buffer, hierdoor kunnen we later dynamisch nog de plaatsing van de sensoren veranderen
             delay_buffer.push(sampler_queue_item);
 
