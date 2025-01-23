@@ -6,3 +6,5 @@
 
 const size_t NUM_SENSORS = 8;
 const size_t SENSOR_WIDTH = 100;
+// mm
+const size_t SENSOR_LONGITUDINAL_SAPCING = 100;

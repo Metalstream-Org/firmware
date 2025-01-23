@@ -120,16 +120,13 @@ void serial_task(void* parameters)
 {
     auto params = static_cast<SerialTaskParams*>(parameters);
 
-    int counter = 0;
-    int64_t last_update = 0;
-
-    char tx_buf[MAX_MESSAGE_LEN];
+    static char tx_buf[MAX_MESSAGE_LEN*2];
     memset(tx_buf, 0, sizeof(tx_buf));
-    char rx_buf[MAX_MESSAGE_LEN];
+    static char rx_buf[MAX_MESSAGE_LEN];
     memset(rx_buf, 0, sizeof(rx_buf));
 
     size_t rd_len = 0;
-    char temp_rx_buf[64];
+    static char temp_rx_buf[BUF_SIZE];
 
     while (true)
     {
@@ -139,10 +136,13 @@ void serial_task(void* parameters)
             memset(tx_buf, 0, sizeof(tx_buf));
         }
 
+        memset(temp_rx_buf, 0x00, sizeof(temp_rx_buf));
         int len = usb_serial_jtag_read_bytes(temp_rx_buf, sizeof(temp_rx_buf), 20 / portTICK_PERIOD_MS);
 
         // Write data back to the USB SERIAL JTAG
         if (len > 0) {
+            temp_rx_buf[len] = '\0';
+
             // check if we have enough space in rd_buf
             if ((rd_len + len + 1)  < sizeof (rx_buf)) {
                 // copy in new received data
@@ -175,15 +175,6 @@ void serial_task(void* parameters)
                         size_t olen = (size_t)end - (size_t)rx_buf;
                         rx_buf[olen] = '\0';
 
-                        counter++;
-
-                        // if ((esp_timer_get_time() - last_update) >= 1000000)
-                        // {
-                        //     ESP_LOGI(TAG, "Counter: %d", counter);
-                        //     counter = 0;
-                        //     last_update = esp_timer_get_time();
-                        // }
-
                         xQueueSend(params->rx_queue, &rx_buf[1], portMAX_DELAY);
                         
                         rd_len = 0;
@@ -192,9 +183,6 @@ void serial_task(void* parameters)
                 }
             }
         }
-
-        // ESP_LOGI(TAG, "Serial task loop\n");
-        // vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
@@ -319,9 +307,13 @@ extern "C" void app_main(void)
 
     std::queue<SamplerQueueItem> delay_buffer;
 
+
+    // Conveyer belt speed in cm/s
+    float conveyer_belt_speed = 9.4;
+
     // the time between top and bottom sensors, should be calibrated
     // s=v*t where s=10cm (distance between sensors front/back) and v=9.4cm (conveyer belt speed). 
-    size_t calibration_time_ms = (10*1000)/9.4;
+    size_t calibration_time_ms = (10*1000)/conveyer_belt_speed;
     MeasuremenstState measurements_state;
 
     int64_t calibration_start_timestamp = 0;
@@ -362,7 +354,7 @@ extern "C" void app_main(void)
 
                     if (result.connected && result.value >= sensors[i].get_threshold())
                     {
-                        ESP_LOGI(TAG, "Sensor S0%d detected metal, %d", result.id, result.value);
+                        // ESP_LOGI(TAG, "Sensor S0%d detected metal, %d", result.id, result.value);
                         // printf("sensor id: %d, detected value: %d\n", result.id, result.value);
                         if (!leftmost_sensor || sensors[i].get_x() < sensors[leftmost_sensor->id - 1].get_x()) {
                             leftmost_sensor = &result;
@@ -378,8 +370,8 @@ extern "C" void app_main(void)
                 if (leftmost_sensor && rightmost_sensor)
                 {
                     int width = sensors[rightmost_sensor->id - 1].get_x() - sensors[leftmost_sensor->id - 1].get_x() + SENSOR_WIDTH;
-                    // printf("Breedte: %d mm (sensor %d tot %d)\n",
-                    //     width, leftmost_sensor->id, rightmost_sensor->id);
+                    ESP_LOGI(TAG, "Breedte: %d mm (sensor %d tot %d)",
+                        width, leftmost_sensor->id, rightmost_sensor->id);
 
                     measurements_state.update(sampler_queue_item.timestamp, width);
                 } else
@@ -389,18 +381,19 @@ extern "C" void app_main(void)
 
                     if (timestamp > 0) {
                         // TODO!: Config check for [0] sensor
-                        int64_t delta =  sampler_queue_item.timestamp - timestamp;
+                        // Delta tijd in seconden
+                        float delta_in_s =  (sampler_queue_item.timestamp - timestamp) / 1000.0 / 1000.0;
+                        int length = delta_in_s / calibration_time_ms;
 
                         char payload[MAX_MESSAGE_LEN];
 
-                        snprintf(payload, sizeof(payload), "W=%d:L=%lld",
-                                    width, delta);
+                        snprintf(payload, sizeof(payload), "W=%d:L=%i",
+                                    width, length);
 
                         send_message(serial_tx_queue, "MET", payload);
 
-                        int length = delta / calibration_time_ms;
 
-                        printf("Got result - timestamp: %lld, length: %dmm, width: %dmm\n", delta, length, width);
+                        ESP_LOGI(TAG, "Got result - timestamp: %5.2fs, length: %dmm, width: %dmm", delta_in_s, length, width);
                     }
 
                     measurements_state.clear();
@@ -426,7 +419,7 @@ extern "C" void app_main(void)
             /* get the first token */
             token = strtok(rx_buf, ":");
 
-                ESP_LOGI(TAG, "%s", token);
+            ESP_LOGI(TAG, "%s", token);
 
 
             while(token != nullptr) {
@@ -455,10 +448,12 @@ extern "C" void app_main(void)
                                     // TODO!
                                     
                                     if (!sensors[i].is_delayed() && calibration_start_timestamp != 0) {
-                                        calibration_time_ms = sampler_queue_item.timestamp - calibration_start_timestamp;
+                                        calibration_time_ms = (sampler_queue_item.timestamp - calibration_start_timestamp) / 1000;
+                                        // s = v*t -> v=s/t where s is equal to the distance between the front and back row and t is equal to the calibration time in seconds.
+                                        conveyer_belt_speed = (SENSOR_LONGITUDINAL_SAPCING/10.0)/(calibration_time_ms/1000.0);
                                         calibration_start_timestamp = 0;
 
-                                        ESP_LOGI(TAG, "Calibrated: %f", calibration_time_ms*10e-6);
+                                        ESP_LOGI(TAG, "Calibrated, the conveyer belt speed is: %fcm/s, the calibration time is: %dms", conveyer_belt_speed, calibration_time_ms);
                                         calibrated = true;
                                     }
                                 }
