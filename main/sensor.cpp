@@ -4,8 +4,9 @@
 
 #include "sensor.h"
 
-Sensor::Sensor(size_t id, int threshold, adc_oneshot_unit_handle_t adc_handle, adc_channel_t sig_adc_channel, gpio_num_t fbl_pin, bool delayed, int x, int y) : m_id{id}, m_threshold{threshold}, m_adc_handle{adc_handle}, m_sig_adc_channel{sig_adc_channel}, m_fbl_pin{fbl_pin}, m_delayed{delayed}, m_x{x}, m_y{y}
+Sensor::Sensor(size_t id, int threshold, adc_oneshot_unit_handle_t adc_handle, adc_channel_t sig_adc_channel, gpio_num_t fbl_pin, bool delayed, int x) : m_id{id}, m_threshold{threshold}, m_adc_handle{adc_handle}, m_sig_adc_channel{sig_adc_channel}, m_fbl_pin{fbl_pin}, m_delayed{delayed}, m_x{x}
 {
+    // Configureer de feedbackloop pin als input en enable de pullup weerstand.
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << fbl_pin),
         .mode = GPIO_MODE_INPUT,
@@ -13,10 +14,9 @@ Sensor::Sensor(size_t id, int threshold, adc_oneshot_unit_handle_t adc_handle, a
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE
     };
-    gpio_config(&io_conf);
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
 
-    // todo for later maby: static constructor for config width etc.
-
+    // Configureer het ADC channel op basis van de signaal pin.
     adc_oneshot_chan_cfg_t config = {
         .atten = ADC_ATTEN_DB_12,
         .bitwidth = ADC_BITWIDTH_DEFAULT,
@@ -24,14 +24,16 @@ Sensor::Sensor(size_t id, int threshold, adc_oneshot_unit_handle_t adc_handle, a
     ESP_ERROR_CHECK(adc_oneshot_config_channel(m_adc_handle, m_sig_adc_channel, &config));
 }
 
+// Haalt de connected status op van de sensor.
 bool Sensor::is_connected() const
 {
     return gpio_get_level(m_fbl_pin) == 0;
 }
 
-int Sensor::get_threshold() const
+// Helper functie om te checken of de waarde boven de sensor threshold ligt.
+bool Sensor::is_above_threshold(uint16_t value)
 {
-    return m_threshold;   
+    return value > m_threshold;   
 }
 
 bool Sensor::is_delayed() const
@@ -42,11 +44,6 @@ bool Sensor::is_delayed() const
 int Sensor::get_x() const
 {
     return m_x;
-}
-
-int Sensor::get_y() const
-{
-    return m_y;
 }
 
 uint16_t Sensor::sample()

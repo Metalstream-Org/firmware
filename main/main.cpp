@@ -279,14 +279,14 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(adc_oneshot_new_unit(&unit_config, &adc1_handle));
 
     Sensor sensors[NUM_SENSORS] = {
-        Sensor(1, 1300, adc1_handle, ADC_CHANNEL_5, GPIO_NUM_41, true, 0, 0),
-        Sensor(2, 1300, adc1_handle, ADC_CHANNEL_4, GPIO_NUM_42, false, 800, 0),
-        Sensor(3, 1300, adc1_handle, ADC_CHANNEL_3, GPIO_NUM_2, true, 1600, 0),
-        Sensor(4, 1300, adc1_handle, ADC_CHANNEL_6, GPIO_NUM_1, false, 2400, 0),
-        // Sensor(5, 1300, adc1_handle, ADC_CHANNEL_7, GPIO_NUM_21, false, 300, 0),
-        // Sensor(6, 1300, adc1_handle, ADC_CHANNEL_9, GPIO_NUM_47, true, 360, 0),
-        // Sensor(7, 1300, adc1_handle, ADC_CHANNEL_8, GPIO_NUM_48, false, 420, 0),
-        // Sensor(8, 1300, adc1_handle, ADC_CHANNEL_2, GPIO_NUM_45, true, 480, 0)
+        Sensor(1, 1300, adc1_handle, ADC_CHANNEL_5, GPIO_NUM_41, true, 0),
+        Sensor(2, 1300, adc1_handle, ADC_CHANNEL_4, GPIO_NUM_42, false, 800),
+        Sensor(3, 1300, adc1_handle, ADC_CHANNEL_3, GPIO_NUM_2, true, 1600),
+        Sensor(4, 1300, adc1_handle, ADC_CHANNEL_6, GPIO_NUM_1, false, 2400),
+        Sensor(5, 1300, adc1_handle, ADC_CHANNEL_7, GPIO_NUM_21, false, 300),
+        Sensor(6, 1300, adc1_handle, ADC_CHANNEL_9, GPIO_NUM_47, true, 360),
+        Sensor(7, 1300, adc1_handle, ADC_CHANNEL_8, GPIO_NUM_48, false, 420),
+        Sensor(8, 1300, adc1_handle, ADC_CHANNEL_2, GPIO_NUM_45, true, 480)
     };
 
     auto queue = xQueueCreate(5, sizeof(SamplerQueueItem));
@@ -352,7 +352,7 @@ extern "C" void app_main(void)
                         : sampler_queue_item.results[i];
 
 
-                    if (result.connected && result.value >= sensors[i].get_threshold())
+                    if (result.connected && sensors[i].is_above_threshold(result.value))
                     {
                         // ESP_LOGI(TAG, "Sensor S0%d detected metal, %d", result.id, result.value);
                         // printf("sensor id: %d, detected value: %d\n", result.id, result.value);
@@ -439,7 +439,7 @@ extern "C" void app_main(void)
 
                             for (size_t i = 0; i < NUM_SENSORS; i++)
                             {
-                                if (sampler_queue_item.results[i].connected && sampler_queue_item.results[i].value >= sensors[i].get_threshold())
+                                if (sampler_queue_item.results[i].connected && sensors[i].is_above_threshold(sampler_queue_item.results[i].value))
                                 {
                                     if (sensors[i].is_delayed() && calibration_start_timestamp == 0)
                                     {
