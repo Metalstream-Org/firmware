@@ -17,35 +17,11 @@
 #include <algorithm>
 #include "sensor.h"
 
-// 9,28 cm/s
+#include "sampler_task.h"
+#include "serial_task.h"
 
 static const char* TAG = "Main";
 
-const size_t BUF_SIZE = 128;
-const size_t MAX_MESSAGE_LEN = 128;
-const size_t SAMPLE_RATE = 20;
-const size_t SAMPLE_INTERVAL_MS = 1000 / SAMPLE_RATE;
-
-struct SerialTaskParams
-{
-    QueueHandle_t tx_queue;
-    QueueHandle_t rx_queue;
-}; 
-
-
-struct SensorResult
-{
-    size_t id;
-    bool connected;
-    int value;
-};
-
-struct SamplerQueueItem
-{
-    int64_t timestamp;
-    // TODO! remove timstamp from sensor result
-    SensorResult results[NUM_SENSORS];
-};
 
 // TODO! better naming
 class MeasuremenstState
@@ -80,113 +56,6 @@ class MeasuremenstState
         int m_max_width;
         int64_t m_start_timestamp = 0;
 };
-
-struct SamplerTaskParams
-{
-    QueueHandle_t queue;
-    size_t num_sensors;
-    Sensor* sensors;
-};
-
-
-// Samples sensors in seperate task 
-void sampler(void* parameters)
-{
-    auto params = static_cast<SamplerTaskParams*>(parameters);
-
-    SamplerQueueItem queue_item;
-
-    while (true) {
-        memset(&queue_item, 0, sizeof(queue_item));
-        queue_item.timestamp = esp_timer_get_time();
-
-        // Sample the sensors
-        for (int i = 0; i < params->num_sensors; i++)
-        {
-            queue_item.results[i].id = i + 1;
-            queue_item.results[i].connected = params->sensors[i].is_connected();
-            queue_item.results[i].value = params->sensors[i].sample();
-        }
-
-        // Verzend het sample naar de queue
-        xQueueSend(params->queue, &queue_item, portMAX_DELAY);
-        // Hier wordt gebruik gemaakt van een delay om te zorgen dat de task sampled op de juiste frequentie (SAMPLE_INTERVAL)
-        vTaskDelay(pdMS_TO_TICKS(SAMPLE_INTERVAL_MS));
-    }
-}
-
-
-void serial_task(void* parameters)
-{
-    auto params = static_cast<SerialTaskParams*>(parameters);
-
-    static char tx_buf[MAX_MESSAGE_LEN*2];
-    memset(tx_buf, 0, sizeof(tx_buf));
-    static char rx_buf[MAX_MESSAGE_LEN];
-    memset(rx_buf, 0, sizeof(rx_buf));
-
-    size_t rd_len = 0;
-    static char temp_rx_buf[BUF_SIZE];
-
-    while (true)
-    {
-        // While loop to empty the tx queue
-        while (xQueueReceive(params->tx_queue, tx_buf, pdMS_TO_TICKS(1))) {
-            usb_serial_jtag_write_bytes(tx_buf, strlen(tx_buf), 20 / portTICK_PERIOD_MS);
-            memset(tx_buf, 0, sizeof(tx_buf));
-        }
-
-        memset(temp_rx_buf, 0x00, sizeof(temp_rx_buf));
-        int len = usb_serial_jtag_read_bytes(temp_rx_buf, sizeof(temp_rx_buf), 20 / portTICK_PERIOD_MS);
-
-        // Write data back to the USB SERIAL JTAG
-        if (len > 0) {
-            temp_rx_buf[len] = '\0';
-
-            // check if we have enough space in rd_buf
-            if ((rd_len + len + 1)  < sizeof (rx_buf)) {
-                // copy in new received data
-                memcpy(&rx_buf[rd_len], temp_rx_buf, len);
-                memset(temp_rx_buf, 0, sizeof(temp_rx_buf));
-                rd_len += len;
-            } else {
-                // discard everything when buffer overflows
-                rd_len = 0;
-            }
-
-            // make sure string is terminated
-            rx_buf[rd_len] = '\0';
-
-            // parse message
-            if (rd_len > 0 ) {
-                char* start = strchr((const char*)rx_buf, '$');
-                
-                // remove everything before start
-                if (start != nullptr)
-                {
-                    rd_len = rd_len - ((size_t)start - (size_t)rx_buf);
-                    memmove(rx_buf, start, rd_len + 1);
-
-                    // check if we have a complete message
-                    char* end = strchr((const char*)rx_buf, '#');
-                    
-                    if (end != nullptr) {
-                        // construct output message (in data), skip for character ($)
-                        size_t olen = (size_t)end - (size_t)rx_buf;
-                        rx_buf[olen] = '\0';
-
-                        xQueueSend(params->rx_queue, &rx_buf[1], portMAX_DELAY);
-                        
-                        rd_len = 0;
-                        memset(rx_buf, 0x00, sizeof(rx_buf));
-                    }
-                }
-            }
-        }
-    }
-}
-
-
 
 // 4 bytes because command consists of 3 characters + zero terminator string
 void send_message(const QueueHandle_t queue, const char command[4], const char* payload)
@@ -292,16 +161,17 @@ extern "C" void app_main(void)
     auto queue = xQueueCreate(5, sizeof(SamplerQueueItem));
     char rx_buf[MAX_MESSAGE_LEN];
 
-    // Create sampler task
+    // Initialiseer and configureer sampler_task
+    auto queue = xQueueCreate(5, sizeof(SamplerQueueItem));
     SamplerTaskParams sampler_params = {queue, NUM_SENSORS, sensors};
-    xTaskCreate(sampler, "sampler", 2048, &sampler_params, 5, nullptr);
+    xTaskCreate(sampler_task, "sampler", 2048, &sampler_params, 1, nullptr);
 
-    // Create serial task
+    // Initialiseer and configureer serial_task
     auto serial_tx_queue = xQueueCreate(10, sizeof(char[MAX_MESSAGE_LEN]));
     auto serial_rx_queue = xQueueCreate(10, sizeof(char[MAX_MESSAGE_LEN]));
 
     SerialTaskParams serial_params = {.tx_queue=serial_tx_queue, .rx_queue=serial_rx_queue};
-    xTaskCreate(serial_task, "serial", 8192, &serial_params, 5, nullptr);
+    xTaskCreate(serial_task, "serial", 8192, &serial_params, 1, nullptr);
 
     SamplerQueueItem sampler_queue_item;
 
