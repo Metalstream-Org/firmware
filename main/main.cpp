@@ -58,7 +58,7 @@ class MeasuremenstState
 };
 
 // 4 bytes because command consists of 3 characters + zero terminator string
-void send_message(const QueueHandle_t queue, const char command[4], const char* payload)
+void send_message(const QueueHandle_t queue, const char command[4], const char* payload) // |\label{line:send_message_function}|
 {
     // ESP_LOGI(TAG, "Send message\n");
     static char buf[MAX_MESSAGE_LEN];
@@ -84,7 +84,7 @@ void send_heartbeat(const QueueHandle_t queue)
     send_message(queue, "HBT", payload);
 }
 
-void send_sensor_measurements(const QueueHandle_t queue, const SamplerQueueItem& item)
+void send_sensor_measurements(const QueueHandle_t queue, const SamplerQueueItem& item) // |\label{line:send_sensor_measurement_function}|
 {
     static char payload[MAX_MESSAGE_LEN];
 
@@ -106,44 +106,19 @@ void send_sensor_measurements(const QueueHandle_t queue, const SamplerQueueItem&
     // TODO: naam
 }
 
-void send_dimensions(const QueueHandle_t queue, const SamplerQueueItem& item)
-{
-    static char payload[MAX_MESSAGE_LEN];
-    memset(payload, 0x00, sizeof(payload));
-
-    int offset = 0;
-
-    offset += snprintf(&payload[offset], sizeof(payload) - offset, "T=%lld:", item.timestamp);
-
-    for (int i = 0; i < NUM_SENSORS; i++)
-    {
-        const char* sep = (i==(NUM_SENSORS-1)) ? "" : ":"; 
-        
-        auto sensor = item.results[i];
-        offset += snprintf(&payload[offset], sizeof(payload) - offset, "ID=%d:C=%d:V=%d%s", 
-            sensor.id,
-            sensor.connected,
-            sensor.value,
-            sep);
-    }
-
-    // TODO: naam
-    send_message(queue, "SMS", payload);
-}
-
 extern "C" void app_main(void)
 {
-    // Initialiseer seriële communicatie via usb cdc poort
+    // Configureer USB CDC driver.
     usb_serial_jtag_driver_config_t usb_serial_jtag_config = {
-        .tx_buffer_size = BUF_SIZE,
-        .rx_buffer_size = BUF_SIZE,
+        .tx_buffer_size = USB_FIFO_BUF_SIZE,
+        .rx_buffer_size = USB_FIFO_BUF_SIZE,
     };
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usb_serial_jtag_config));
 
-    // Initialiseer ADC driver
+    // Initialiseer en configureer ADC driver. Alle analoge ingangen zitten op ADC1.
     adc_oneshot_unit_handle_t adc1_handle;
     adc_oneshot_unit_init_cfg_t unit_config = {
-        .unit_id = ADC_UNIT_1,  // Gebruik ADC Unit 1
+        .unit_id = ADC_UNIT_1,
     };
     ESP_ERROR_CHECK(adc_oneshot_new_unit(&unit_config, &adc1_handle));
 
@@ -152,13 +127,13 @@ extern "C" void app_main(void)
         Sensor(2, 1300, adc1_handle, ADC_CHANNEL_4, GPIO_NUM_42, false, 800),
         Sensor(3, 1300, adc1_handle, ADC_CHANNEL_3, GPIO_NUM_2, true, 1600),
         Sensor(4, 1300, adc1_handle, ADC_CHANNEL_6, GPIO_NUM_1, false, 2400),
-        Sensor(5, 1300, adc1_handle, ADC_CHANNEL_7, GPIO_NUM_21, false, 300),
-        Sensor(6, 1300, adc1_handle, ADC_CHANNEL_9, GPIO_NUM_47, true, 360),
-        Sensor(7, 1300, adc1_handle, ADC_CHANNEL_8, GPIO_NUM_48, false, 420),
-        Sensor(8, 1300, adc1_handle, ADC_CHANNEL_2, GPIO_NUM_45, true, 480)
+        Sensor(5, 1300, adc1_handle, ADC_CHANNEL_7, GPIO_NUM_21, true, 300),
+        Sensor(6, 1300, adc1_handle, ADC_CHANNEL_9, GPIO_NUM_47, false, 360),
+        Sensor(7, 1300, adc1_handle, ADC_CHANNEL_8, GPIO_NUM_48, true, 420),
+        Sensor(8, 1300, adc1_handle, ADC_CHANNEL_2, GPIO_NUM_45, false, 480)
     };
 
-    auto queue = xQueueCreate(5, sizeof(SamplerQueueItem));
+
     char rx_buf[MAX_MESSAGE_LEN];
 
     // Initialiseer and configureer sampler_task
@@ -178,12 +153,11 @@ extern "C" void app_main(void)
     std::queue<SamplerQueueItem> delay_buffer;
 
 
-    // Conveyer belt speed in cm/s
-    float conveyer_belt_speed = 9.4;
+    // Snelheid van de band in cm/s, wordt geinitialiseerd met de standaard snelheid, maar kan worden gecalibreerd.
+    float conveyer_belt_speed = INITIAL_CONVEYER_BELT_SPEED;
 
-    // the time between top and bottom sensors, should be calibrated
-    // s=v*t where s=10cm (distance between sensors front/back) and v=9.4cm (conveyer belt speed). 
-    size_t calibration_time_ms = (10*1000)/conveyer_belt_speed;
+    // De kalibratie tijd, is de tijd die tussen de bovenste en onderste rij zit. Er geldt s=v*t. Hierbij is s, de longitudinale afstand tussen de sensoren en v, de snelheid van de band. 
+    size_t calibration_time_ms = (SENSOR_LONGITUDINAL_SAPCING*100)/conveyer_belt_speed;
     MeasuremenstState measurements_state;
 
     int64_t calibration_start_timestamp = 0;
@@ -193,24 +167,24 @@ extern "C" void app_main(void)
 
     while(true)
     {
+        // Bereken het aantal samples dat wordt genomen in de tijd tussen de bovenste en onderste rij.
         size_t num_delayed_samples = calibration_time_ms * SAMPLE_RATE / 1000;
 
-        // Hier wordt gebruik gemaakt van een while loop, omdat we alle inkomende samples willen verwerken, als we dit niet doen loopt de queue over
+        // Hier wordt gebruik gemaakt van een while loop, omdat we alle inkomende samples willen verwerken, als we dit niet doen loopt de queue over.
         while (xQueueReceive(queue, &sampler_queue_item, pdMS_TO_TICKS(1)))
         {
-            // Voeg elk sample wat binnenkomt ook toe aan de delay buffer, hierdoor kunnen we later dynamisch nog de plaatsing van de sensoren veranderen
-            delay_buffer.push(sampler_queue_item);
+            // Voeg elk sample wat binnenkomt ook toe aan de delay buffer, hierdoor kunnen we later dynamisch nog de plaatsing van de sensoren veranderen.
+            delay_buffer.push(sampler_queue_item); // |\label{line:add_to_delay_buffer}|
 
-            // De samples op de tweede rij moeten met de tijd tussen rij een en rij twee worden vertraagd, dit is op basis van de snelheid van de lopende band. Vervolgens rekenen we met die tijd en de sample rate het aantal samples dat in deze tijd genomen worden. Op basis hiervan bepalen we de delay buffer grootte. We checken hier of de grootte van de delay buffer groter is, omdat hiervoor al een sample wordt gepushed naar de delay buffer
+            // De samples op de tweede rij moeten met de tijd tussen rij een en rij twee worden vertraagd, dit is op basis van de snelheid van de lopende band.
+            // Vervolgens rekenen we met die tijd en de sample rate het aantal samples dat in deze tijd genomen worden.
+            // Op basis hiervan bepalen we de delay buffer grootte. We checken hier of de grootte van de delay buffer groter is, omdat hiervoor al een sample wordt gepushed naar de delay buffer
             if (delay_buffer.size() > num_delayed_samples)
             {
-                // De delay buffer werkt als een FIFO buffer. We willen hier dus het eerste item uit de queue halen. Deze is vertraagd met de tijd tussen de rijen
-                auto delayed_queue_item = delay_buffer.front();
+                // De delay buffer werkt als een FIFO buffer. We willen hier dus het eerste item uit de queue halen.
+                // Deze is vertraagd met het aantal samples dat in de calibration_time_ms kan worden genomen, oftwel de tijd tussen de bovenste en onderste rij.
+                auto delayed_queue_item = delay_buffer.front(); // |\label{line:delayed_sample}|
                 delay_buffer.pop();
-
-                // ESP_LOGI(TAG, "delay sample time: %lld, sample time: %lld, delta: %lld", delayed_queue_item.timestamp, sampler_queue_item.timestamp, sampler_queue_item.timestamp-delayed_queue_item.timestamp);
-
-                // printf("item timestamp: %lld - delayed item timestamp: %lld | DELTA: %lld\n", sampler_queue_item.timestamp, delayed_queue_item.timestamp, (sampler_queue_item.timestamp - delayed_queue_item.timestamp)/1000);
 
                 const SensorResult* leftmost_sensor = nullptr;
                 const SensorResult* rightmost_sensor = nullptr;
@@ -239,7 +213,7 @@ extern "C" void app_main(void)
                 // Bereken breedte als beide sensoren zijn gevonden
                 if (leftmost_sensor && rightmost_sensor)
                 {
-                    int width = sensors[rightmost_sensor->id - 1].get_x() - sensors[leftmost_sensor->id - 1].get_x() + SENSOR_WIDTH;
+                    int width = sensors[rightmost_sensor->id - 1].get_x() - sensors[leftmost_sensor->id - 1].get_x() + SENSOR_WIDTH; // |\label{line:determine_width}|
                     ESP_LOGI(TAG, "Breedte: %d mm (sensor %d tot %d)",
                         width, leftmost_sensor->id, rightmost_sensor->id);
 
@@ -255,7 +229,7 @@ extern "C" void app_main(void)
                         float delta_in_s =  (sampler_queue_item.timestamp - timestamp) / 1000.0 / 1000.0;
                         
                         // s=v*t
-                        size_t length = static_cast<size_t>((conveyer_belt_speed*10)*delta_in_s);
+                        uint16_t length = static_cast<uint16_t>((conveyer_belt_speed*10)*delta_in_s);
 
                         char payload[MAX_MESSAGE_LEN];
 
@@ -265,34 +239,21 @@ extern "C" void app_main(void)
                         send_message(serial_tx_queue, "MET", payload);
 
 
-                        ESP_LOGI(TAG, "Got result - timestamp: %5.2fs, length: %dmm, width: %dmm", delta_in_s, length, width);
+                        ESP_LOGI(TAG, "Got result - timestamp: %5.2fs, length: %dmm, width: %dmm, speed: %fcm/s", delta_in_s, length, width, conveyer_belt_speed);
                     }
 
                     measurements_state.clear();
                 }
-
-
-                // printf("first item timestamp: %lld - second item timestamp: %lld | DELTA: %lld\n", combined_results[0].timestamp, combined_results[1].timestamp, (combined_results[0].timestamp - combined_results[1].timestamp)/1000);
-
             }
 
    
-            // ESP_LOGI(TAG, "sending measurements at %lld. SENSOR 1 connected: %d", sampler_queue_item.timestamp, sampler_queue_item.results[0].connected);
             send_sensor_measurements(serial_tx_queue, sampler_queue_item);
-                // printf("S0%d - timestamp: %lld, connected: %d, sampled: %d\n", i+1, sampler_queue_item.results[i].timestamp, sampler_queue_item.results[i].connected, sampler_queue_item.results[i].value);        
         }
 
         if (xQueueReceive(serial_rx_queue, &rx_buf, pdMS_TO_TICKS(1)))
         {
-            ESP_LOGD(TAG, "Queue receive RX: %s\n", rx_buf);
-
-            char *token;
-            
-            /* get the first token */
+            char *token;   
             token = strtok(rx_buf, ":");
-
-            ESP_LOGI(TAG, "%s", token);
-
 
             while(token != nullptr) {
                 if (strcmp(token, "CAL") == 0) {
@@ -305,8 +266,6 @@ extern "C" void app_main(void)
                     {
                         while (xQueueReceive(queue, &sampler_queue_item, pdMS_TO_TICKS(1)))
                         {
-                            // ESP_LOGI(TAG, "timestamp sample: %lld", sampler_queue_item.timestamp);
-
                             for (size_t i = 0; i < NUM_SENSORS; i++)
                             {
                                 if (sampler_queue_item.results[i].connected && sensors[i].is_above_threshold(sampler_queue_item.results[i].value))
@@ -316,8 +275,6 @@ extern "C" void app_main(void)
                                         calibration_start_timestamp = sampler_queue_item.timestamp;
                                         ESP_LOGI(TAG, "First calibration timestamp: %lld", calibration_start_timestamp);
                                     }
-                                    
-                                    // TODO!
                                     
                                     if (!sensors[i].is_delayed() && calibration_start_timestamp != 0) {
                                         calibration_time_ms = (sampler_queue_item.timestamp - calibration_start_timestamp) / 1000;
