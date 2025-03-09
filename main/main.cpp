@@ -35,7 +35,9 @@ class MeasuremenstState
         void update(int64_t timestamp, int width)
         {
             m_max_width = std::max<int>(width, m_max_width);
-            
+
+            ESP_LOGI(TAG, "width is: %d and max width is: %d", width, m_max_width);
+
             if (m_start_timestamp == 0)
             {
                 m_start_timestamp = timestamp;
@@ -99,15 +101,14 @@ void send_sensor_measurements(const QueueHandle_t queue, const SamplerQueueItem&
             sensor.connected,
             sensor.value);
         
-        // ESP_LOGI(TAG, "Sending message for sensor: %d", i+1);
         send_message(queue, "SMS", payload);
     }
-
-    // TODO: naam
 }
 
 extern "C" void app_main(void)
 {
+    ESP_LOGI(TAG, "Starting Metalshare Hub...");
+
     // Configureer USB CDC driver.
     usb_serial_jtag_driver_config_t usb_serial_jtag_config = {
         .tx_buffer_size = USB_FIFO_BUF_SIZE,
@@ -122,17 +123,17 @@ extern "C" void app_main(void)
     };
     ESP_ERROR_CHECK(adc_oneshot_new_unit(&unit_config, &adc1_handle));
 
+    // Initialiseer en configureer sensoren.
     Sensor sensors[NUM_SENSORS] = {
-        Sensor(1, 1300, adc1_handle, ADC_CHANNEL_5, GPIO_NUM_41, true, 0),
-        Sensor(2, 1300, adc1_handle, ADC_CHANNEL_4, GPIO_NUM_42, false, 800),
-        Sensor(3, 1300, adc1_handle, ADC_CHANNEL_3, GPIO_NUM_2, true, 1600),
-        Sensor(4, 1300, adc1_handle, ADC_CHANNEL_6, GPIO_NUM_1, false, 2400),
-        Sensor(5, 1300, adc1_handle, ADC_CHANNEL_7, GPIO_NUM_21, true, 300),
-        Sensor(6, 1300, adc1_handle, ADC_CHANNEL_9, GPIO_NUM_47, false, 360),
-        Sensor(7, 1300, adc1_handle, ADC_CHANNEL_8, GPIO_NUM_48, true, 420),
-        Sensor(8, 1300, adc1_handle, ADC_CHANNEL_2, GPIO_NUM_45, false, 480)
+        Sensor(1, 1500, adc1_handle, ADC_CHANNEL_6, GPIO_NUM_18, true, 1100),
+        Sensor(2, 1500, adc1_handle, ADC_CHANNEL_5, GPIO_NUM_17, false, 2100),
+        Sensor(3, 1500, adc1_handle, ADC_CHANNEL_4, GPIO_NUM_16, true, 3300),
+        Sensor(4, 1500, adc1_handle, ADC_CHANNEL_0, GPIO_NUM_15, false, 4350),
+        Sensor(5, 1500, adc1_handle, ADC_CHANNEL_7, GPIO_NUM_21, false, 300),
+        Sensor(6, 1500, adc1_handle, ADC_CHANNEL_9, GPIO_NUM_47, false, 360),
+        Sensor(7, 1500, adc1_handle, ADC_CHANNEL_8, GPIO_NUM_48, false, 420),
+        Sensor(8, 1500, adc1_handle, ADC_CHANNEL_2, GPIO_NUM_45, false, 480)
     };
-
 
     char rx_buf[MAX_MESSAGE_LEN];
 
@@ -149,9 +150,8 @@ extern "C" void app_main(void)
     xTaskCreate(serial_task, "serial", 8192, &serial_params, 1, nullptr);
 
     SamplerQueueItem sampler_queue_item;
-
+    // De delay buffer wordt gebruikt om samples te vertragen, zodat we de tijd tussen de bovenste en onderste rij kunnen berekenen.
     std::queue<SamplerQueueItem> delay_buffer;
-
 
     // Snelheid van de band in cm/s, wordt geinitialiseerd met de standaard snelheid, maar kan worden gecalibreerd.
     float conveyer_belt_speed = INITIAL_CONVEYER_BELT_SPEED;
@@ -162,8 +162,6 @@ extern "C" void app_main(void)
 
     int64_t calibration_start_timestamp = 0;
     bool calibrated = false;
-
-    ESP_LOGI(TAG, "Starting...\n");
 
     while(true)
     {
@@ -196,10 +194,9 @@ extern "C" void app_main(void)
                         : sampler_queue_item.results[i];
 
 
-                    if (result.connected && sensors[i].is_above_threshold(result.value))
+                    if (result.connected && sensors[i].is_value_above_threshold(result.value))
                     {
-                        // ESP_LOGI(TAG, "Sensor S0%d detected metal, %d", result.id, result.value);
-                        // printf("sensor id: %d, detected value: %d\n", result.id, result.value);
+                        ESP_LOGI(TAG, "Sensor %02d detected metal, %d", result.id, result.value);
                         if (!leftmost_sensor || sensors[i].get_x() < sensors[leftmost_sensor->id - 1].get_x()) {
                             leftmost_sensor = &result;
                         }
@@ -213,9 +210,9 @@ extern "C" void app_main(void)
                 // Bereken breedte als beide sensoren zijn gevonden
                 if (leftmost_sensor && rightmost_sensor)
                 {
-                    int width = sensors[rightmost_sensor->id - 1].get_x() - sensors[leftmost_sensor->id - 1].get_x() + SENSOR_WIDTH; // |\label{line:determine_width}|
-                    ESP_LOGI(TAG, "Breedte: %d mm (sensor %d tot %d)",
-                        width, leftmost_sensor->id, rightmost_sensor->id);
+                    int width = sensors[rightmost_sensor->id - 1].get_x() - sensors[leftmost_sensor->id - 1].get_x() + SENSOR_WIDTH * (rightmost_sensor->id-leftmost_sensor->id); // |\label{line:determine_width}|
+                    ESP_LOGI(TAG, "Breedte: %d mm (sensor %d tot %d) value: %d",
+                        width, leftmost_sensor->id, rightmost_sensor->id, sampler_queue_item.results[0].value);
 
                     measurements_state.update(sampler_queue_item.timestamp, width);
                 } else
@@ -228,13 +225,12 @@ extern "C" void app_main(void)
                         // Delta tijd in seconden
                         float delta_in_s =  (sampler_queue_item.timestamp - timestamp) / 1000.0 / 1000.0;
                         
-                        // s=v*t
                         uint16_t length = static_cast<uint16_t>((conveyer_belt_speed*10)*delta_in_s);
 
                         char payload[MAX_MESSAGE_LEN];
 
-                        snprintf(payload, sizeof(payload), "W=%d:L=%i",
-                                    width, length);
+                        snprintf(payload, sizeof(payload), "W=%d:L=%d:S=%f",
+                                    width, length, conveyer_belt_speed);
 
                         send_message(serial_tx_queue, "MET", payload);
 
@@ -257,7 +253,7 @@ extern "C" void app_main(void)
 
             while(token != nullptr) {
                 if (strcmp(token, "CAL") == 0) {
-                    ESP_LOGI(TAG, "CALIBRATION MODE\n");
+                    ESP_LOGI(TAG, "CALIBRATION MODE met start time: %lld en calibration time: %d\n", calibration_start_timestamp, calibration_time_ms);
 
                     calibrated = false;
                     calibration_start_timestamp = 0;
@@ -268,22 +264,39 @@ extern "C" void app_main(void)
                         {
                             for (size_t i = 0; i < NUM_SENSORS; i++)
                             {
-                                if (sampler_queue_item.results[i].connected && sensors[i].is_above_threshold(sampler_queue_item.results[i].value))
+                                if (sampler_queue_item.results[i].connected && sensors[i].is_value_above_threshold(sampler_queue_item.results[i].value))
                                 {
                                     if (sensors[i].is_delayed() && calibration_start_timestamp == 0)
                                     {
                                         calibration_start_timestamp = sampler_queue_item.timestamp;
                                         ESP_LOGI(TAG, "First calibration timestamp: %lld", calibration_start_timestamp);
-                                    }
-                                    
-                                    if (!sensors[i].is_delayed() && calibration_start_timestamp != 0) {
+                                    } else if (!sensors[i].is_delayed() && calibration_start_timestamp != 0)
+                                    {
                                         calibration_time_ms = (sampler_queue_item.timestamp - calibration_start_timestamp) / 1000;
                                         // s = v*t -> v=s/t where s is equal to the distance between the front and back row and t is equal to the calibration time in seconds.
-                                        conveyer_belt_speed = (SENSOR_LONGITUDINAL_SAPCING/10.0)/(calibration_time_ms/1000.0);
-                                        calibration_start_timestamp = 0;
 
-                                        ESP_LOGI(TAG, "Calibrated, the conveyer belt speed is: %fcm/s, the calibration time is: %dms", conveyer_belt_speed, calibration_time_ms);
+                                        if (calibration_time_ms > 0)
+                                        {
+                                            conveyer_belt_speed = (SENSOR_LONGITUDINAL_SAPCING/10.0)/(calibration_time_ms/1000.0);
+                                            ESP_LOGI(TAG, "Calibrated, the conveyer belt speed is: %fcm/s, the calibration time is: %dms", conveyer_belt_speed, calibration_time_ms);
+                                        } else
+                                        {
+                                            ESP_LOGI(TAG, "Calibration time equal to zero, calibration aborted, fallback to: %fcm/s", conveyer_belt_speed);
+                                        }
+                                        
+                                        calibration_start_timestamp = 0;
                                         calibrated = true;
+                                    
+                                    // Abort if calibration takes too long, fallback to default speed
+                                    } else if (sensors[i].is_delayed() && calibration_start_timestamp != 0 )
+                                    {
+                                        int delta_time = sampler_queue_item.timestamp - calibration_start_timestamp;
+
+                                        if (delta_time > MAX_CALIBRATION_TIME_MS*1000)
+                                        {
+                                            ESP_LOGI(TAG, "Calibration took to look");
+                                            calibrated = true;
+                                        }
                                     }
                                 }
                             }

@@ -31,7 +31,7 @@ bool Sensor::is_connected() const
 }
 
 // Helper functie om te checken of de waarde boven de sensor threshold ligt.
-bool Sensor::is_above_threshold(uint16_t value)
+bool Sensor::is_value_above_threshold(uint16_t value)
 {
     return value > m_threshold;   
 }
